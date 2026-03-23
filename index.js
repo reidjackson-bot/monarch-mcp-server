@@ -8,7 +8,7 @@ import { z } from "zod";
 
 const PORT = process.env.PORT || 10000;
 const MONARCH_TOKEN = process.env.MONARCH_TOKEN;
-const MONARCH_API = "https://api.monarchmoney.com/graphql";
+const MONARCH_API = "https://api.monarch.com/graphql";
 
 async function monarchQuery(query, variables = {}) {
   const res = await fetch(MONARCH_API, {
