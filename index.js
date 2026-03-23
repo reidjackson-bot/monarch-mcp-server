@@ -5,26 +5,44 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import express from "express";
 import { z } from "zod";
-import {
-  getAccounts,
-  getTransactions,
-  getBudgets,
-  getAggregateSnapshots,
-  getAccountHoldings,
-  getRecentAccountBalances,
-  getTransactionCategories,
-  requestAccountsRefreshAndWait,
-} from "monarch-money-api";
 
-const PORT = process.env.PORT || 8080;
+const PORT = process.env.PORT || 10000;
+const MONARCH_TOKEN = process.env.MONARCH_TOKEN;
+const MONARCH_API = "https://api.monarchmoney.com/graphql";
+
+async function monarchQuery(query, variables = {}) {
+  const res = await fetch(MONARCH_API, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Token ${MONARCH_TOKEN}`,
+    },
+    body: JSON.stringify({ query, variables }),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Monarch API error ${res.status}: ${text.substring(0, 200)}`);
+  }
+  return res.json();
+}
 
 function createServer() {
   const server = new McpServer({ name: "monarch-money", version: "1.0.0" });
 
   server.tool("monarch_get_accounts", "Get all linked financial accounts with current balances.", {}, async () => {
     try {
-      const accounts = await getAccounts();
-      return { content: [{ type: "text", text: JSON.stringify(accounts, null, 2) }] };
+      const data = await monarchQuery(`
+        query {
+          accounts {
+            id displayName currentBalance displayBalance
+            type { name display }
+            subtype { name display }
+            institution { name }
+            includeInNetWorth isAsset isHidden
+          }
+        }
+      `);
+      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
     } catch (error) {
       return { content: [{ type: "text", text: `Error: ${error.message}` }] };
     }
@@ -36,17 +54,26 @@ function createServer() {
     start_date: z.string().optional().describe("YYYY-MM-DD"),
     end_date: z.string().optional().describe("YYYY-MM-DD"),
     search: z.string().optional().default(""),
-    category_ids: z.array(z.string()).optional().default([]),
-    account_ids: z.array(z.string()).optional().default([]),
-    is_recurring: z.boolean().optional(),
-  }, async ({ limit, offset, start_date, end_date, search, category_ids, account_ids, is_recurring }) => {
+  }, async ({ limit, offset, start_date, end_date, search }) => {
     try {
-      const params = { limit, offset, search, categoryIds: category_ids, accountIds: account_ids };
-      if (start_date) params.startDate = start_date;
-      if (end_date) params.endDate = end_date;
-      if (is_recurring !== undefined) params.isRecurring = is_recurring;
-      const transactions = await getTransactions(params);
-      return { content: [{ type: "text", text: JSON.stringify(transactions, null, 2) }] };
+      const filters = { limit, offset, search };
+      if (start_date) filters.startDate = start_date;
+      if (end_date) filters.endDate = end_date;
+      const data = await monarchQuery(`
+        query GetTransactions($filters: TransactionFilterInput) {
+          allTransactions(filters: $filters) {
+            results {
+              id date amount
+              merchant { name }
+              category { name }
+              account { displayName }
+              pending notes isRecurring
+            }
+            totalCount
+          }
+        }
+      `, { filters });
+      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
     } catch (error) {
       return { content: [{ type: "text", text: `Error: ${error.message}` }] };
     }
@@ -57,8 +84,20 @@ function createServer() {
     end_date: z.string().optional().describe("YYYY-MM-DD"),
   }, async ({ start_date, end_date }) => {
     try {
-      const budgets = await getBudgets(start_date, end_date);
-      return { content: [{ type: "text", text: JSON.stringify(budgets, null, 2) }] };
+      const data = await monarchQuery(`
+        query GetBudgets($startDate: Date, $endDate: Date) {
+          budgetData(startDate: $startDate, endDate: $endDate) {
+            totalIncome totalExpenses totalSavings
+            budgetCategories {
+              category { name }
+              budgetAmount { amount }
+              actualAmount
+              remainingAmount
+            }
+          }
+        }
+      `, { startDate: start_date, endDate: end_date });
+      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
     } catch (error) {
       return { content: [{ type: "text", text: `Error: ${error.message}` }] };
     }
@@ -67,11 +106,33 @@ function createServer() {
   server.tool("monarch_get_net_worth", "Get net worth snapshots and trends.", {
     start_date: z.string().optional().describe("YYYY-MM-DD"),
     end_date: z.string().optional().describe("YYYY-MM-DD"),
-    account_type: z.string().optional(),
-  }, async ({ start_date, end_date, account_type }) => {
+  }, async ({ start_date, end_date }) => {
     try {
-      const snapshots = await getAggregateSnapshots(start_date, end_date, account_type);
-      return { content: [{ type: "text", text: JSON.stringify(snapshots, null, 2) }] };
+      const data = await monarchQuery(`
+        query GetNetWorth($startDate: Date, $endDate: Date) {
+          aggregateSnapshots(startDate: $startDate, endDate: $endDate) {
+            date assetsBalance liabilitiesBalance
+          }
+          accounts {
+            id displayName currentBalance
+            type { name display }
+            isAsset includeInNetWorth
+            institution { name }
+          }
+        }
+      `, { startDate: start_date, endDate: end_date });
+      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+    } catch (error) {
+      return { content: [{ type: "text", text: `Error: ${error.message}` }] };
+    }
+  });
+
+  server.tool("monarch_get_categories", "Get all transaction categories.", {}, async () => {
+    try {
+      const data = await monarchQuery(`
+        query { categories { id name group { name } } }
+      `);
+      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
     } catch (error) {
       return { content: [{ type: "text", text: `Error: ${error.message}` }] };
     }
@@ -81,28 +142,16 @@ function createServer() {
     account_id: z.string().describe("Account ID from monarch_get_accounts"),
   }, async ({ account_id }) => {
     try {
-      const holdings = await getAccountHoldings(account_id);
-      return { content: [{ type: "text", text: JSON.stringify(holdings, null, 2) }] };
-    } catch (error) {
-      return { content: [{ type: "text", text: `Error: ${error.message}` }] };
-    }
-  });
-
-  server.tool("monarch_get_balances", "Get recent balance history.", {
-    start_date: z.string().optional().describe("YYYY-MM-DD"),
-  }, async ({ start_date }) => {
-    try {
-      const balances = await getRecentAccountBalances(start_date);
-      return { content: [{ type: "text", text: JSON.stringify(balances, null, 2) }] };
-    } catch (error) {
-      return { content: [{ type: "text", text: `Error: ${error.message}` }] };
-    }
-  });
-
-  server.tool("monarch_get_categories", "Get all transaction categories.", {}, async () => {
-    try {
-      const categories = await getTransactionCategories();
-      return { content: [{ type: "text", text: JSON.stringify(categories, null, 2) }] };
+      const data = await monarchQuery(`
+        query GetHoldings($accountId: UUID!) {
+          portfolio(accountId: $accountId) {
+            holdings {
+              name ticker quantity value costBasis
+            }
+          }
+        }
+      `, { accountId: account_id });
+      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
     } catch (error) {
       return { content: [{ type: "text", text: `Error: ${error.message}` }] };
     }
@@ -110,8 +159,10 @@ function createServer() {
 
   server.tool("monarch_refresh_accounts", "Trigger fresh sync from all banks.", {}, async () => {
     try {
-      const result = await requestAccountsRefreshAndWait();
-      return { content: [{ type: "text", text: JSON.stringify({ status: "complete", result }, null, 2) }] };
+      const data = await monarchQuery(`
+        mutation { requestAccountsRefresh { success } }
+      `);
+      return { content: [{ type: "text", text: JSON.stringify({ status: "refresh_requested", data }, null, 2) }] };
     } catch (error) {
       return { content: [{ type: "text", text: `Error: ${error.message}` }] };
     }
@@ -150,5 +201,5 @@ app.delete("/mcp", (_req, res) => {
 
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`[MONARCH MCP] Running on port ${PORT}`);
-  console.log(`[MONARCH MCP] Token: ${process.env.MONARCH_TOKEN ? "configured" : "MISSING"}`);
+  console.log(`[MONARCH MCP] Token: ${MONARCH_TOKEN ? "configured" : "MISSING"}`);
 });
