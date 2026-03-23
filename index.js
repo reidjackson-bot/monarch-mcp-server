@@ -1,205 +1,359 @@
-process.on('uncaughtException', (err) => { console.error('Uncaught:', err); });
-process.on('unhandledRejection', (err) => { console.error('Unhandled:', err); });
+import express from 'express';
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { z } from 'zod';
 
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import express from "express";
-import { z } from "zod";
-
-const PORT = process.env.PORT || 10000;
+const PORT = parseInt(process.env.PORT || '3000', 10);
 const MONARCH_TOKEN = process.env.MONARCH_TOKEN;
-const MONARCH_API = "https://api.monarch.com/graphql";
+const MONARCH_API_URL = 'https://api.monarch.com/graphql';
 
-async function monarchQuery(query, variables = {}) {
-  const res = await fetch(MONARCH_API, {
-    method: "POST",
+if (!MONARCH_TOKEN) {
+  console.error('Missing MONARCH_TOKEN environment variable');
+  process.exit(1);
+}
+
+// --- Monarch GraphQL Client ---
+
+async function monarchQuery(query: string, variables: Record<string, any> = {}): Promise<any> {
+  const response = await fetch(MONARCH_API_URL, {
+    method: 'POST',
     headers: {
-      "Content-Type": "application/json",
-      "Authorization": `Token ${MONARCH_TOKEN}`,
+      'Content-Type': 'application/json',
+      'Authorization': `Token ${MONARCH_TOKEN}`,
+      'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     },
     body: JSON.stringify({ query, variables }),
   });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Monarch API error ${res.status}: ${text.substring(0, 200)}`);
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Monarch API error (${response.status}): ${text.substring(0, 500)}`);
   }
-  return res.json();
+
+  const data = await response.json();
+  if (data.errors) {
+    throw new Error(`GraphQL errors: ${JSON.stringify(data.errors)}`);
+  }
+  return data;
 }
 
-function createServer() {
-  const server = new McpServer({ name: "monarch-money", version: "1.0.0" });
+// --- GraphQL Queries ---
 
-  server.tool("monarch_get_accounts", "Get all linked financial accounts with current balances.", {}, async () => {
-    try {
-      const data = await monarchQuery(`
-        query {
-          accounts {
-            id displayName currentBalance displayBalance
-            type { name display }
-            subtype { name display }
-            institution { name }
-            includeInNetWorth isAsset isHidden
-          }
+const GET_ACCOUNTS = `
+  query GetAccounts {
+    accounts {
+      id
+      displayName
+      currentBalance
+      displayBalance
+      type { name display }
+      subtype { name display }
+      institution { name }
+      includeInNetWorth
+      isAsset
+      isHidden
+    }
+  }
+`;
+
+const GET_TRANSACTIONS = `
+  query GetTransactions($offset: Int, $limit: Int, $filters: TransactionFilterInput, $orderBy: TransactionOrdering) {
+    allTransactions(filters: $filters, limit: $limit, offset: $offset, orderBy: $orderBy) {
+      totalCount
+      results {
+        id
+        date
+        amount
+        merchant { name }
+        category { name }
+        account { displayName id }
+        pending
+        notes
+        isRecurring
+        originalName
+      }
+    }
+  }
+`;
+
+const GET_TRANSACTION_CATEGORIES = `
+  query GetCategories {
+    categories {
+      id
+      name
+      group { name }
+    }
+  }
+`;
+
+const GET_ACCOUNT_SNAPSHOTS = `
+  query GetAccountSnapshots($startDate: String!, $endDate: String!, $accountIds: [UUID!]) {
+    accountSnapshotsByType(startDate: $startDate, endDate: $endDate, accountIds: $accountIds) {
+      accountType
+      month
+      balance
+    }
+  }
+`;
+
+const GET_CASHFLOW = `
+  query GetCashflow($startDate: String!, $endDate: String!) {
+    cashflow(startDate: $startDate, endDate: $endDate) {
+      summary {
+        sumIncome
+        sumExpense
+        savings
+        savingsRate
+      }
+    }
+  }
+`;
+
+const GET_CASHFLOW_SUMMARY = `
+  query GetCashflowSummary($startDate: String!, $endDate: String!) {
+    cashflow(startDate: $startDate, endDate: $endDate) {
+      summary {
+        sumIncome
+        sumExpense
+        savings
+        savingsRate
+      }
+    }
+  }
+`;
+
+const GET_BUDGETS = `
+  query GetBudgets($startDate: String, $endDate: String) {
+    budgets(startDate: $startDate, endDate: $endDate) {
+      budgetItem {
+        id
+        category { name }
+        budgetAmount {
+          amount
         }
-      `);
-      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
-    } catch (error) {
-      return { content: [{ type: "text", text: `Error: ${error.message}` }] };
+        currentAmount
+      }
     }
+  }
+`;
+
+const GET_HOLDINGS = `
+  query GetAccountHoldings($accountId: UUID!) {
+    accountHoldings(accountId: $accountId) {
+      id
+      name
+      ticker
+      closingPrice
+      quantity
+      value
+      costBasis
+    }
+  }
+`;
+
+const REFRESH_ACCOUNTS = `
+  mutation RequestAccountsRefresh {
+    requestAccountsRefresh {
+      success
+    }
+  }
+`;
+
+// --- MCP Server Factory ---
+
+function createServer(): McpServer {
+  const server = new McpServer({
+    name: 'monarch-money-mcp',
+    version: '2.0.0',
   });
 
-  server.tool("monarch_get_transactions", "Get transactions with filtering.", {
-    limit: z.number().optional().default(100),
-    offset: z.number().optional().default(0),
-    start_date: z.string().optional().describe("YYYY-MM-DD"),
-    end_date: z.string().optional().describe("YYYY-MM-DD"),
-    search: z.string().optional().default(""),
-  }, async ({ limit, offset, start_date, end_date, search }) => {
-    try {
-      const filters = { limit, offset, search };
-      if (start_date) filters.startDate = start_date;
-      if (end_date) filters.endDate = end_date;
-      const data = await monarchQuery(`
-        query GetTransactions($filters: TransactionFilterInput) {
-          allTransactions(filters: $filters) {
-            results {
-              id date amount
-              merchant { name }
-              category { name }
-              account { displayName }
-              pending notes isRecurring
-            }
-            totalCount
-          }
-        }
-      `, { filters });
-      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
-    } catch (error) {
-      return { content: [{ type: "text", text: `Error: ${error.message}` }] };
+  // Tool: Get all accounts
+  server.tool(
+    'monarch_get_accounts',
+    'Get all financial accounts linked to Monarch Money with current balances, types, and institution info.',
+    {},
+    async () => {
+      const data = await monarchQuery(GET_ACCOUNTS);
+      return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
     }
-  });
+  );
 
-  server.tool("monarch_get_budgets", "Get budget data by category.", {
-    start_date: z.string().optional().describe("YYYY-MM-DD"),
-    end_date: z.string().optional().describe("YYYY-MM-DD"),
-  }, async ({ start_date, end_date }) => {
-    try {
-      const data = await monarchQuery(`
-        query GetBudgets($startDate: Date, $endDate: Date) {
-          budgetData(startDate: $startDate, endDate: $endDate) {
-            totalIncome totalExpenses totalSavings
-            budgetCategories {
-              category { name }
-              budgetAmount { amount }
-              actualAmount
-              remainingAmount
-            }
-          }
-        }
-      `, { startDate: start_date, endDate: end_date });
-      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
-    } catch (error) {
-      return { content: [{ type: "text", text: `Error: ${error.message}` }] };
-    }
-  });
+  // Tool: Get transactions with filtering
+  server.tool(
+    'monarch_get_transactions',
+    'Get transactions with optional filters: date range, account, search text, category, amount range, and limit. Returns transactions sorted by date descending.',
+    {
+      startDate: z.string().optional().describe('Start date filter (YYYY-MM-DD)'),
+      endDate: z.string().optional().describe('End date filter (YYYY-MM-DD)'),
+      accountIds: z.array(z.string()).optional().describe('Array of account IDs to filter by'),
+      search: z.string().optional().describe('Search text to filter transactions by merchant name or notes'),
+      categoryIds: z.array(z.string()).optional().describe('Array of category IDs to filter by'),
+      limit: z.number().optional().describe('Max number of transactions to return (default 30, max 500)'),
+      offset: z.number().optional().describe('Offset for pagination (default 0)'),
+    },
+    async ({ startDate, endDate, accountIds, search, categoryIds, limit, offset }) => {
+      const filters: Record<string, any> = {};
+      if (startDate) filters.startDate = startDate;
+      if (endDate) filters.endDate = endDate;
+      if (accountIds && accountIds.length > 0) filters.accountIds = accountIds;
+      if (search) filters.search = search;
+      if (categoryIds && categoryIds.length > 0) filters.categories = categoryIds;
 
-  server.tool("monarch_get_net_worth", "Get net worth snapshots and trends.", {
-    start_date: z.string().optional().describe("YYYY-MM-DD"),
-    end_date: z.string().optional().describe("YYYY-MM-DD"),
-  }, async ({ start_date, end_date }) => {
-    try {
-      const data = await monarchQuery(`
-        query GetNetWorth($startDate: Date, $endDate: Date) {
-          aggregateSnapshots(startDate: $startDate, endDate: $endDate) {
-            date assetsBalance liabilitiesBalance
-          }
-          accounts {
-            id displayName currentBalance
-            type { name display }
-            isAsset includeInNetWorth
-            institution { name }
-          }
-        }
-      `, { startDate: start_date, endDate: end_date });
-      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
-    } catch (error) {
-      return { content: [{ type: "text", text: `Error: ${error.message}` }] };
-    }
-  });
+      const variables: Record<string, any> = {
+        filters,
+        limit: Math.min(limit || 30, 500),
+        offset: offset || 0,
+        orderBy: 'date',
+      };
 
-  server.tool("monarch_get_categories", "Get all transaction categories.", {}, async () => {
-    try {
-      const data = await monarchQuery(`
-        query { categories { id name group { name } } }
-      `);
-      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
-    } catch (error) {
-      return { content: [{ type: "text", text: `Error: ${error.message}` }] };
+      const data = await monarchQuery(GET_TRANSACTIONS, variables);
+      return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
     }
-  });
+  );
 
-  server.tool("monarch_get_holdings", "Get investment holdings for an account.", {
-    account_id: z.string().describe("Account ID from monarch_get_accounts"),
-  }, async ({ account_id }) => {
-    try {
-      const data = await monarchQuery(`
-        query GetHoldings($accountId: UUID!) {
-          portfolio(accountId: $accountId) {
-            holdings {
-              name ticker quantity value costBasis
-            }
-          }
-        }
-      `, { accountId: account_id });
-      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
-    } catch (error) {
-      return { content: [{ type: "text", text: `Error: ${error.message}` }] };
+  // Tool: Get balance history / account snapshots
+  server.tool(
+    'monarch_get_balances',
+    'Get historical balance snapshots by account type over a date range. Useful for tracking balance trends.',
+    {
+      startDate: z.string().describe('Start date (YYYY-MM-DD)'),
+      endDate: z.string().describe('End date (YYYY-MM-DD)'),
+      accountIds: z.array(z.string()).optional().describe('Optional array of account IDs to filter'),
+    },
+    async ({ startDate, endDate, accountIds }) => {
+      const variables: Record<string, any> = { startDate, endDate };
+      if (accountIds && accountIds.length > 0) variables.accountIds = accountIds;
+      const data = await monarchQuery(GET_ACCOUNT_SNAPSHOTS, variables);
+      return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
     }
-  });
+  );
 
-  server.tool("monarch_refresh_accounts", "Trigger fresh sync from all banks.", {}, async () => {
-    try {
-      const data = await monarchQuery(`
-        mutation { requestAccountsRefresh { success } }
-      `);
-      return { content: [{ type: "text", text: JSON.stringify({ status: "refresh_requested", data }, null, 2) }] };
-    } catch (error) {
-      return { content: [{ type: "text", text: `Error: ${error.message}` }] };
+  // Tool: Get cashflow summary
+  server.tool(
+    'monarch_get_cashflow',
+    'Get cashflow summary (income, expenses, savings, savings rate) for a date range.',
+    {
+      startDate: z.string().describe('Start date (YYYY-MM-DD)'),
+      endDate: z.string().describe('End date (YYYY-MM-DD)'),
+    },
+    async ({ startDate, endDate }) => {
+      const data = await monarchQuery(GET_CASHFLOW_SUMMARY, { startDate, endDate });
+      return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
     }
-  });
+  );
+
+  // Tool: Get budgets
+  server.tool(
+    'monarch_get_budgets',
+    'Get budget data including planned vs actual amounts by category.',
+    {
+      startDate: z.string().optional().describe('Start date (YYYY-MM-DD)'),
+      endDate: z.string().optional().describe('End date (YYYY-MM-DD)'),
+    },
+    async ({ startDate, endDate }) => {
+      const variables: Record<string, any> = {};
+      if (startDate) variables.startDate = startDate;
+      if (endDate) variables.endDate = endDate;
+      const data = await monarchQuery(GET_BUDGETS, variables);
+      return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+    }
+  );
+
+  // Tool: Get holdings for a brokerage account
+  server.tool(
+    'monarch_get_holdings',
+    'Get investment holdings (securities, quantities, values) for a specific brokerage account.',
+    {
+      accountId: z.string().describe('The account ID to get holdings for'),
+    },
+    async ({ accountId }) => {
+      const data = await monarchQuery(GET_HOLDINGS, { accountId });
+      return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+    }
+  );
+
+  // Tool: Get transaction categories
+  server.tool(
+    'monarch_get_categories',
+    'Get all transaction categories and their groups configured in Monarch Money.',
+    {},
+    async () => {
+      const data = await monarchQuery(GET_TRANSACTION_CATEGORIES);
+      return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+    }
+  );
+
+  // Tool: Refresh accounts
+  server.tool(
+    'monarch_refresh_accounts',
+    'Trigger a sync/refresh of all linked financial accounts in Monarch Money.',
+    {},
+    async () => {
+      const data = await monarchQuery(REFRESH_ACCOUNTS);
+      return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+    }
+  );
 
   return server;
 }
 
+// --- Express App ---
+
 const app = express();
 app.use(express.json());
 
-app.get("/health", (_req, res) => { res.json({ status: "ok" }); });
+// Health check
+app.get('/health', (_req, res) => {
+  res.json({ status: 'ok', version: '2.0.0', timestamp: new Date().toISOString() });
+});
 
-app.post("/mcp", async (req, res) => {
+// MCP endpoint - stateless
+app.post('/mcp', async (req, res) => {
   try {
     const server = createServer();
-    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
-    res.on("close", () => { transport.close().catch(() => {}); server.close().catch(() => {}); });
+    const transport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: undefined,
+    });
+
+    res.on('close', () => {
+      transport.close().catch(() => {});
+      server.close().catch(() => {});
+    });
+
     await server.connect(transport);
     await transport.handleRequest(req, res, req.body);
   } catch (error) {
-    console.error("[MCP] Error:", error);
+    console.error('[MCP] Error handling request:', error);
     if (!res.headersSent) {
-      res.status(500).json({ jsonrpc: "2.0", error: { code: -32603, message: "Internal server error" }, id: null });
+      res.status(500).json({
+        jsonrpc: '2.0',
+        error: { code: -32603, message: 'Internal server error' },
+        id: null,
+      });
     }
   }
 });
 
-app.get("/mcp", (_req, res) => {
-  res.writeHead(405).end(JSON.stringify({ jsonrpc: "2.0", error: { code: -32000, message: "Use POST." }, id: null }));
+// Handle GET
+app.get('/mcp', async (_req, res) => {
+  res.writeHead(405).end(JSON.stringify({
+    jsonrpc: '2.0',
+    error: { code: -32000, message: 'Method not allowed. Use POST for MCP requests.' },
+    id: null,
+  }));
 });
 
-app.delete("/mcp", (_req, res) => {
-  res.writeHead(405).end(JSON.stringify({ jsonrpc: "2.0", error: { code: -32000, message: "Not supported." }, id: null }));
+// Handle DELETE
+app.delete('/mcp', async (_req, res) => {
+  res.writeHead(405).end(JSON.stringify({
+    jsonrpc: '2.0',
+    error: { code: -32000, message: 'Session management not supported in stateless mode.' },
+    id: null,
+  }));
 });
 
-app.listen(PORT, "0.0.0.0", () => {
-  console.log(`[MONARCH MCP] Running on port ${PORT}`);
-  console.log(`[MONARCH MCP] Token: ${MONARCH_TOKEN ? "configured" : "MISSING"}`);
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`[Monarch MCP] Server v2.0.0 running on http://0.0.0.0:${PORT}`);
+  console.log(`[Monarch MCP] MCP endpoint: http://0.0.0.0:${PORT}/mcp`);
+  console.log(`[Monarch MCP] Health check: http://0.0.0.0:${PORT}/health`);
 });
