@@ -78,8 +78,8 @@ const GET_TRANSACTIONS_SIMPLE = `
 `;
 
 const GET_TRANSACTIONS_FILTERED = `
-  query GetTransactionsList($offset: Int, $limit: Int, $filters: TransactionFilterInput, $orderBy: TransactionOrdering) {
-    allTransactions(filters: $filters, limit: $limit, offset: $offset, orderBy: $orderBy) {
+  query GetTransactions($filters: TransactionFilterInput) {
+    allTransactions(filters: $filters) {
       totalCount
       results {
         id
@@ -205,17 +205,15 @@ function createServer() {
       const filters = {};
       if (startDate) filters.startDate = startDate;
       if (endDate) filters.endDate = endDate;
-      if (accountIds && accountIds.length > 0) filters.accountIds = accountIds;
+      if (accountIds && accountIds.length > 0) filters.accounts = accountIds;
       if (search) filters.search = search;
       if (categoryIds && categoryIds.length > 0) filters.categories = categoryIds;
 
       try {
         const variables = {
           filters: Object.keys(filters).length > 0 ? filters : undefined,
-          limit: limit ? Math.min(limit, 500) : 100,
-          offset: offset || 0,
         };
-        const data = await monarchQuery(GET_TRANSACTIONS_FILTERED, variables, 'GetTransactionsList');
+        const data = await monarchQuery(GET_TRANSACTIONS_FILTERED, variables, 'GetTransactions');
         return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
       } catch (err) {
         const data = await monarchQuery(GET_TRANSACTIONS_SIMPLE);
