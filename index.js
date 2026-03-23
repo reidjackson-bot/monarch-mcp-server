@@ -41,6 +41,11 @@ async function monarchQuery(query, variables = {}, operationName = undefined) {
   return data;
 }
 
+// ============================================================
+// GraphQL Queries — aligned with Monarch's actual schema
+// (reference: hammem/monarchmoney Python library + community fork)
+// ============================================================
+
 const GET_ACCOUNTS = `
   query GetAccounts {
     accounts {
@@ -58,39 +63,25 @@ const GET_ACCOUNTS = `
   }
 `;
 
-const GET_TRANSACTIONS_SIMPLE = `
-  query {
-    allTransactions {
-      totalCount
-      results {
-        id
-        date
-        amount
-        merchant { name }
-        category { name }
-        account { displayName id }
-        pending
-        notes
-        isRecurring
-      }
-    }
-  }
-`;
-
-const GET_TRANSACTIONS_FILTERED = `
-  query GetTransactions($filters: TransactionFilterInput) {
+// FIX #1: limit/offset are arguments on the `results` field, NOT on `allTransactions`.
+// The query signature includes $offset, $limit, $orderBy as top-level variables,
+// but they are passed to `results(...)` inside `allTransactions`.
+const GET_TRANSACTIONS = `
+  query GetTransactionsList($offset: Int, $limit: Int, $filters: TransactionFilterInput, $orderBy: TransactionOrdering) {
     allTransactions(filters: $filters) {
       totalCount
-      results {
+      results(offset: $offset, limit: $limit, orderBy: $orderBy) {
         id
-        date
         amount
-        merchant { name }
-        category { name }
-        account { displayName id }
         pending
+        date
+        hideFromReports
         notes
         isRecurring
+        merchant { name }
+        category { id name }
+        account { id displayName }
+        tags { id name }
       }
     }
   }
@@ -101,7 +92,7 @@ const GET_TRANSACTION_CATEGORIES = `
     categories {
       id
       name
-      group { name }
+      group { id name type }
     }
   }
 `;
@@ -116,9 +107,11 @@ const GET_ACCOUNT_SNAPSHOTS = `
   }
 `;
 
+// FIX #2: Cashflow uses `aggregates(filters:)` with TransactionFilterInput, NOT `cashflow(startDate, endDate)`.
+// Dates go inside $filters.startDate / $filters.endDate.
 const GET_CASHFLOW_SUMMARY = `
-  query GetCashflowSummary($startDate: String!, $endDate: String!) {
-    cashflow(startDate: $startDate, endDate: $endDate) {
+  query Web_GetCashFlowPage($filters: TransactionFilterInput) {
+    summary: aggregates(filters: $filters, fillEmptyValues: true) {
       summary {
         sumIncome
         sumExpense
@@ -129,31 +122,202 @@ const GET_CASHFLOW_SUMMARY = `
   }
 `;
 
-const GET_BUDGETS = `
-  query GetBudgets($startDate: String, $endDate: String) {
-    budgets(startDate: $startDate, endDate: $endDate) {
-      budgetItem {
-        id
-        category { name }
-        budgetAmount {
-          amount
+// Extended cashflow with category breakdown
+const GET_CASHFLOW_BY_CATEGORY = `
+  query Web_GetCashFlowPage($filters: TransactionFilterInput) {
+    byCategory: aggregates(filters: $filters, groupBy: ["category"]) {
+      groupBy {
+        category {
+          id
+          name
+          group {
+            id
+            type
+            name
+          }
         }
-        currentAmount
+      }
+      summary {
+        sumIncome
+        sumExpense
+        savings
+        savingsRate
       }
     }
   }
 `;
 
-const GET_HOLDINGS = `
-  query GetAccountHoldings($accountId: UUID!) {
-    accountHoldings(accountId: $accountId) {
+// FIX #3: Budgets use `budgetData(startMonth:, endMonth:)` with Date! scalars, NOT `budgets(startDate, endDate)`.
+const GET_BUDGETS = `
+  query GetJointPlanningData($startDate: Date!, $endDate: Date!, $useLegacyGoals: Boolean!, $useV2Goals: Boolean!) {
+    budgetData(startMonth: $startDate, endMonth: $endDate) {
+      monthlyAmountsByCategory {
+        category {
+          id
+          name
+        }
+        monthlyAmounts {
+          month
+          plannedCashFlowAmount
+          plannedSetAsideAmount
+          actualAmount
+          remainingAmount
+          previousMonthRolloverAmount
+          rolloverType
+        }
+      }
+      monthlyAmountsByCategoryGroup {
+        categoryGroup {
+          id
+          name
+        }
+        monthlyAmounts {
+          month
+          plannedCashFlowAmount
+          actualAmount
+          remainingAmount
+          previousMonthRolloverAmount
+          rolloverType
+        }
+      }
+      monthlyAmountsForFlexExpense {
+        budgetVariability
+        monthlyAmounts {
+          month
+          plannedCashFlowAmount
+          actualAmount
+          remainingAmount
+          previousMonthRolloverAmount
+          rolloverType
+        }
+      }
+      totalsByMonth {
+        month
+        totalIncome {
+          plannedAmount
+          actualAmount
+          remainingAmount
+          previousMonthRolloverAmount
+        }
+        totalExpenses {
+          plannedAmount
+          actualAmount
+          remainingAmount
+          previousMonthRolloverAmount
+        }
+        totalFixedExpenses {
+          plannedAmount
+          actualAmount
+          remainingAmount
+          previousMonthRolloverAmount
+        }
+        totalNonMonthlyExpenses {
+          plannedAmount
+          actualAmount
+          remainingAmount
+          previousMonthRolloverAmount
+        }
+        totalFlexibleExpenses {
+          plannedAmount
+          actualAmount
+          remainingAmount
+          previousMonthRolloverAmount
+        }
+      }
+    }
+    categoryGroups {
       id
       name
-      ticker
-      closingPrice
-      quantity
-      value
-      costBasis
+      order
+      groupLevelBudgetingEnabled
+      budgetVariability
+      categories {
+        id
+        name
+        order
+        budgetVariability
+      }
+      type
+    }
+  }
+`;
+
+// FIX #4: Holdings use `portfolio(input: PortfolioInput)` with nested `aggregateHoldings`,
+// NOT `accountHoldings(accountId)`.
+const GET_HOLDINGS = `
+  query Web_GetHoldings($input: PortfolioInput) {
+    portfolio(input: $input) {
+      aggregateHoldings {
+        edges {
+          node {
+            id
+            quantity
+            basis
+            totalValue
+            securityPriceChangeDollars
+            securityPriceChangePercent
+            lastSyncedAt
+            holdings {
+              id
+              type
+              typeDisplay
+              name
+              ticker
+              closingPrice
+              isManual
+              closingPriceUpdatedAt
+            }
+            security {
+              id
+              name
+              type
+              ticker
+              typeDisplay
+              currentPrice
+              currentPriceUpdatedAt
+              closingPrice
+              closingPriceUpdatedAt
+              oneDayChangePercent
+              oneDayChangeDollars
+            }
+          }
+        }
+      }
+    }
+  }
+`;
+
+// Transaction aggregates/summary
+const GET_TRANSACTION_SUMMARY = `
+  query GetTransactionsPage($filters: TransactionFilterInput) {
+    aggregates(filters: $filters) {
+      summary {
+        avg
+        count
+        max
+        maxExpense
+        sum
+        sumIncome
+        sumExpense
+        first
+        last
+      }
+    }
+  }
+`;
+
+// Recurring transactions
+const GET_RECURRING_TRANSACTIONS = `
+  query GetRecurringTransactions {
+    recurringTransactions {
+      id
+      title
+      amount
+      frequency
+      isActive
+      merchant { name }
+      category { id name }
+      account { id displayName }
     }
   }
 `;
@@ -169,9 +333,10 @@ const REFRESH_ACCOUNTS = `
 function createServer() {
   const server = new McpServer({
     name: 'monarch-money-mcp',
-    version: '2.0.0',
+    version: '3.0.0',
   });
 
+  // ─── Accounts ───
   server.tool(
     'monarch_get_accounts',
     'Get all financial accounts linked to Monarch Money with current balances, types, and institution info.',
@@ -182,46 +347,64 @@ function createServer() {
     }
   );
 
+  // ─── Transactions (with working pagination) ───
   server.tool(
     'monarch_get_transactions',
-    'Get transactions with optional filters: date range, account, search text, category, and limit.',
+    'Get transactions with optional filters: date range, account, search text, category, and limit. Supports pagination via limit/offset.',
     {
       startDate: z.string().optional().describe('Start date filter (YYYY-MM-DD)'),
       endDate: z.string().optional().describe('End date filter (YYYY-MM-DD)'),
       accountIds: z.array(z.string()).optional().describe('Array of account IDs to filter by'),
       search: z.string().optional().describe('Search text to filter by merchant name or notes'),
       categoryIds: z.array(z.string()).optional().describe('Array of category IDs to filter by'),
-      limit: z.number().optional().describe('Max transactions to return (default 30, max 500)'),
+      limit: z.number().optional().describe('Max transactions to return (default 100, max 500)'),
       offset: z.number().optional().describe('Offset for pagination (default 0)'),
     },
     async ({ startDate, endDate, accountIds, search, categoryIds, limit, offset }) => {
-      const hasFilters = startDate || endDate || accountIds || search || categoryIds || limit || offset;
-
-      if (!hasFilters) {
-        const data = await monarchQuery(GET_TRANSACTIONS_SIMPLE);
-        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
-      }
-
+      // Build the filters object (goes into TransactionFilterInput)
       const filters = {};
       if (startDate) filters.startDate = startDate;
       if (endDate) filters.endDate = endDate;
+      if (search !== undefined && search !== '') filters.search = search;
       if (accountIds && accountIds.length > 0) filters.accounts = accountIds;
-      if (search) filters.search = search;
       if (categoryIds && categoryIds.length > 0) filters.categories = categoryIds;
 
-      try {
-        const variables = {
-          filters: Object.keys(filters).length > 0 ? filters : undefined,
-        };
-        const data = await monarchQuery(GET_TRANSACTIONS_FILTERED, variables, 'GetTransactions');
-        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
-      } catch (err) {
-        const data = await monarchQuery(GET_TRANSACTIONS_SIMPLE);
-        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) + '\n\nNote: Filtering was not applied due to API error. Showing default results.' }] };
-      }
+      // limit/offset/orderBy are top-level variables, passed to results() field
+      const variables = {
+        filters: Object.keys(filters).length > 0 ? filters : undefined,
+        limit: limit ?? 100,
+        offset: offset ?? 0,
+        orderBy: 'date',
+      };
+
+      const data = await monarchQuery(GET_TRANSACTIONS, variables, 'GetTransactionsList');
+      return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
     }
   );
 
+  // ─── Transaction Summary (aggregates) ───
+  server.tool(
+    'monarch_get_transaction_summary',
+    'Get transaction aggregates/summary (count, sum, avg, income, expense totals) for a date range.',
+    {
+      startDate: z.string().optional().describe('Start date (YYYY-MM-DD)'),
+      endDate: z.string().optional().describe('End date (YYYY-MM-DD)'),
+      accountIds: z.array(z.string()).optional().describe('Array of account IDs to filter by'),
+      search: z.string().optional().describe('Search text filter'),
+    },
+    async ({ startDate, endDate, accountIds, search }) => {
+      const filters = {};
+      if (startDate) filters.startDate = startDate;
+      if (endDate) filters.endDate = endDate;
+      if (search) filters.search = search;
+      if (accountIds && accountIds.length > 0) filters.accounts = accountIds;
+
+      const data = await monarchQuery(GET_TRANSACTION_SUMMARY, { filters });
+      return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+    }
+  );
+
+  // ─── Balances (historical snapshots) ───
   server.tool(
     'monarch_get_balances',
     'Get historical balance snapshots by account type over a date range.',
@@ -238,6 +421,7 @@ function createServer() {
     }
   );
 
+  // ─── Cashflow Summary ───
   server.tool(
     'monarch_get_cashflow',
     'Get cashflow summary (income, expenses, savings, savings rate) for a date range.',
@@ -246,27 +430,67 @@ function createServer() {
       endDate: z.string().describe('End date (YYYY-MM-DD)'),
     },
     async ({ startDate, endDate }) => {
-      const data = await monarchQuery(GET_CASHFLOW_SUMMARY, { startDate, endDate });
+      const filters = {
+        startDate,
+        endDate,
+        search: '',
+        categories: [],
+        accounts: [],
+        tags: [],
+      };
+      const data = await monarchQuery(GET_CASHFLOW_SUMMARY, { filters }, 'Web_GetCashFlowPage');
       return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
     }
   );
 
+  // ─── Cashflow by Category ───
   server.tool(
-    'monarch_get_budgets',
-    'Get budget data including planned vs actual amounts by category.',
+    'monarch_get_cashflow_by_category',
+    'Get cashflow broken down by category (income and expenses per category) for a date range.',
     {
-      startDate: z.string().optional().describe('Start date (YYYY-MM-DD)'),
-      endDate: z.string().optional().describe('End date (YYYY-MM-DD)'),
+      startDate: z.string().describe('Start date (YYYY-MM-DD)'),
+      endDate: z.string().describe('End date (YYYY-MM-DD)'),
     },
     async ({ startDate, endDate }) => {
-      const variables = {};
-      if (startDate) variables.startDate = startDate;
-      if (endDate) variables.endDate = endDate;
-      const data = await monarchQuery(GET_BUDGETS, variables);
+      const filters = {
+        startDate,
+        endDate,
+        search: '',
+        categories: [],
+        accounts: [],
+        tags: [],
+      };
+      const data = await monarchQuery(GET_CASHFLOW_BY_CATEGORY, { filters }, 'Web_GetCashFlowPage');
       return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
     }
   );
 
+  // ─── Budgets ───
+  server.tool(
+    'monarch_get_budgets',
+    'Get budget data including planned vs actual amounts by category for a date range.',
+    {
+      startDate: z.string().optional().describe('Start date (YYYY-MM-DD), defaults to current month start'),
+      endDate: z.string().optional().describe('End date (YYYY-MM-DD), defaults to current month end'),
+    },
+    async ({ startDate, endDate }) => {
+      // Default to current month if not specified
+      const now = new Date();
+      const defaultStart = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().split('T')[0];
+      const defaultEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0).toISOString().split('T')[0];
+
+      const variables = {
+        startDate: startDate || defaultStart,
+        endDate: endDate || defaultEnd,
+        useLegacyGoals: false,
+        useV2Goals: true,
+      };
+      const data = await monarchQuery(GET_BUDGETS, variables, 'GetJointPlanningData');
+      return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+    }
+  );
+
+  // ─── Holdings ───
   server.tool(
     'monarch_get_holdings',
     'Get investment holdings for a specific brokerage account.',
@@ -274,11 +498,21 @@ function createServer() {
       accountId: z.string().describe('The account ID to get holdings for'),
     },
     async ({ accountId }) => {
-      const data = await monarchQuery(GET_HOLDINGS, { accountId });
+      const today = new Date().toISOString().split('T')[0];
+      const variables = {
+        input: {
+          accountIds: [accountId],
+          startDate: today,
+          endDate: today,
+          includeHiddenHoldings: true,
+        },
+      };
+      const data = await monarchQuery(GET_HOLDINGS, variables, 'Web_GetHoldings');
       return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
     }
   );
 
+  // ─── Categories ───
   server.tool(
     'monarch_get_categories',
     'Get all transaction categories and their groups.',
@@ -289,6 +523,22 @@ function createServer() {
     }
   );
 
+  // ─── Recurring Transactions ───
+  server.tool(
+    'monarch_get_recurring',
+    'Get recurring/subscription transactions.',
+    {},
+    async () => {
+      try {
+        const data = await monarchQuery(GET_RECURRING_TRANSACTIONS);
+        return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+      } catch (err) {
+        return { content: [{ type: 'text', text: 'Recurring transactions query failed: ' + err.message }] };
+      }
+    }
+  );
+
+  // ─── Refresh Accounts ───
   server.tool(
     'monarch_refresh_accounts',
     'Trigger a sync/refresh of all linked financial accounts.',
@@ -306,7 +556,7 @@ const app = express();
 app.use(express.json());
 
 app.get('/health', (_req, res) => {
-  res.json({ status: 'ok', version: '2.0.0', timestamp: new Date().toISOString() });
+  res.json({ status: 'ok', version: '3.0.0', timestamp: new Date().toISOString() });
 });
 
 app.post('/mcp', async (req, res) => {
@@ -352,5 +602,5 @@ app.delete('/mcp', (_req, res) => {
 });
 
 app.listen(PORT, '0.0.0.0', () => {
-  console.log('[Monarch MCP] v2.0.0 on port ' + PORT);
+  console.log('[Monarch MCP] v3.0.0 on port ' + PORT);
 });
