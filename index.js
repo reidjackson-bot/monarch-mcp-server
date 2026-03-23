@@ -52,24 +52,47 @@ const GET_ACCOUNTS = `
   }
 `;
 
-const GET_TRANSACTIONS = `
-  query GetTransactions($offset: Int, $limit: Int, $filters: TransactionFilterInput) {
-    allTransactions(filters: $filters, limit: $limit, offset: $offset) {
-      totalCount
-      results {
-        id
-        date
-        amount
-        merchant { name }
-        category { name }
-        account { displayName id }
-        pending
-        notes
-        isRecurring
+function buildTransactionQuery(filters, limit, offset) {
+  const args = [];
+  if (limit) args.push('limit: ' + limit);
+  if (offset) args.push('offset: ' + offset);
+
+  const filterParts = [];
+  if (filters.startDate) filterParts.push('startDate: "' + filters.startDate + '"');
+  if (filters.endDate) filterParts.push('endDate: "' + filters.endDate + '"');
+  if (filters.search) filterParts.push('search: "' + filters.search + '"');
+  if (filters.accountIds && filters.accountIds.length > 0) {
+    filterParts.push('accountIds: ["' + filters.accountIds.join('","') + '"]');
+  }
+  if (filters.categories && filters.categories.length > 0) {
+    filterParts.push('categories: ["' + filters.categories.join('","') + '"]');
+  }
+
+  if (filterParts.length > 0) {
+    args.push('filters: {' + filterParts.join(', ') + '}');
+  }
+
+  const argsStr = args.length > 0 ? '(' + args.join(', ') + ')' : '';
+
+  return `
+    query GetTransactions {
+      allTransactions${argsStr} {
+        totalCount
+        results {
+          id
+          date
+          amount
+          merchant { name }
+          category { name }
+          account { displayName id }
+          pending
+          notes
+          isRecurring
+        }
       }
     }
-  }
-`;
+  `;
+}
 
 const GET_TRANSACTION_CATEGORIES = `
   query GetCategories {
@@ -177,13 +200,8 @@ function createServer() {
       if (search) filters.search = search;
       if (categoryIds && categoryIds.length > 0) filters.categories = categoryIds;
 
-      const variables = {
-        filters,
-        limit: Math.min(limit || 30, 500),
-        offset: offset || 0,
-      };
-
-      const data = await monarchQuery(GET_TRANSACTIONS, variables);
+      const query = buildTransactionQuery(filters, Math.min(limit || 30, 500), offset || 0);
+      const data = await monarchQuery(query);
       return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
     }
   );
