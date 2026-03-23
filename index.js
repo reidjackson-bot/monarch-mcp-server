@@ -12,15 +12,21 @@ if (!MONARCH_TOKEN) {
   process.exit(1);
 }
 
-async function monarchQuery(query, variables = {}) {
+async function monarchQuery(query, variables = {}, operationName = undefined) {
+  const body = { query };
+  if (variables && Object.keys(variables).length > 0) body.variables = variables;
+  if (operationName) body.operationName = operationName;
+
   const response = await fetch(MONARCH_API_URL, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       'Authorization': 'Token ' + MONARCH_TOKEN,
-      'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
+      'Client-Platform': 'web',
+      'Origin': 'https://app.monarch.com',
+      'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     },
-    body: JSON.stringify({ query, variables }),
+    body: JSON.stringify(body),
   });
 
   if (!response.ok) {
@@ -208,9 +214,8 @@ function createServer() {
           filters: Object.keys(filters).length > 0 ? filters : undefined,
           limit: limit ? Math.min(limit, 500) : 100,
           offset: offset || 0,
-          orderBy: undefined,
         };
-        const data = await monarchQuery(GET_TRANSACTIONS_FILTERED, variables);
+        const data = await monarchQuery(GET_TRANSACTIONS_FILTERED, variables, 'GetTransactionsList');
         return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
       } catch (err) {
         const data = await monarchQuery(GET_TRANSACTIONS_SIMPLE);
