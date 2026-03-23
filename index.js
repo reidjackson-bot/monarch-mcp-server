@@ -53,8 +53,8 @@ const GET_ACCOUNTS = `
 `;
 
 const GET_TRANSACTIONS = `
-  query GetTransactions($offset: Int, $limit: Int, $filters: TransactionFilterInput, $orderBy: TransactionOrdering) {
-    allTransactions(filters: $filters, limit: $limit, offset: $offset, orderBy: $orderBy) {
+  query GetTransactions($offset: Int, $limit: Int, $filters: TransactionFilterInput) {
+    allTransactions(filters: $filters, limit: $limit, offset: $offset) {
       totalCount
       results {
         id
@@ -66,7 +66,6 @@ const GET_TRANSACTIONS = `
         pending
         notes
         isRecurring
-        originalName
       }
     }
   }
@@ -182,7 +181,6 @@ function createServer() {
         filters,
         limit: Math.min(limit || 30, 500),
         offset: offset || 0,
-        orderBy: 'date',
       };
 
       const data = await monarchQuery(GET_TRANSACTIONS, variables);
