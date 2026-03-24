@@ -558,7 +558,7 @@ app.get('/health', (_req, res) => {
 });
 app.get('/api/accounts', (_req, res) => { monarchQuery(GET_ACCOUNTS).then(d => res.json(d)).catch(e => res.status(500).json({error: String(e)})); });
 app.get('/api/transactions', (req, res) => { monarchQuery(GET_TRANSACTIONS, {filters: {startDate: req.query.startDate, endDate: req.query.endDate}}).then(d => res.json(d)).catch(e => res.status(500).json({error: String(e)})); });
-app.get('/api/cashflow', (req, res) => { monarchQuery(GET_CASHFLOW_BY_CATEGORY, {startDate: req.query.startDate, endDate: req.query.endDate}).then(d => res.json(d)).catch(e => res.status(500).json({error: String(e)})); });
+app.get('/api/cashflow', (req, res) => { monarchQuery(GET_CASHFLOW_BY_CATEGORY, {filters: {startDate: req.query.startDate, endDate: req.query.endDate}}).then(d => res.json(d)).catch(e => res.status(500).json({error: e.message})); });
 
 app.post('/mcp', async (req, res) => {
   try {
