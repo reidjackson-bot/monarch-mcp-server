@@ -556,6 +556,9 @@ app.use(express.json());
 app.get('/health', (_req, res) => {
   res.json({ status: 'ok', version: '3.0.0', timestamp: new Date().toISOString() });
 });
+app.get('/api/accounts', async (_req: any, res: any) => { try { const d = await monarchQuery(GET_ACCOUNTS); res.json(d); } catch(e: any) { res.status(500).json({error: e.message}); } });
+app.get('/api/transactions', async (req: any, res: any) => { try { const d = await monarchQuery(GET_TRANSACTIONS, { filters: { startDate: req.query.startDate, endDate: req.query.endDate } }); res.json(d); } catch(e: any) { res.status(500).json({error: e.message}); } });
+app.get('/api/cashflow', async (req: any, res: any) => { try { const d = await monarchQuery(GET_CASHFLOW_BY_CATEGORY, { startDate: req.query.startDate, endDate: req.query.endDate }); res.json(d); } catch(e: any) { res.status(500).json({error: e.message}); } });
 
 app.post('/mcp', async (req, res) => {
   try {
