@@ -149,7 +149,7 @@ const GET_CASHFLOW_BY_CATEGORY = `
 
 // FIX #3: Budgets use `budgetData(startMonth:, endMonth:)` with Date! scalars, NOT `budgets(startDate, endDate)`.
 const GET_BUDGETS = `
-  query GetJointPlanningData($startDate: Date!, $endDate: Date!, $useLegacyGoals: Boolean!, $useV2Goals: Boolean!) {
+  query GetJointPlanningData($startDate: Date!, $endDate: Date!) {
     budgetData(startMonth: $startDate, endMonth: $endDate) {
       monthlyAmountsByCategory {
         category {
@@ -482,8 +482,6 @@ function createServer() {
       const variables = {
         startDate: startDate || defaultStart,
         endDate: endDate || defaultEnd,
-        useLegacyGoals: false,
-        useV2Goals: true,
       };
       const data = await monarchQuery(GET_BUDGETS, variables, 'GetJointPlanningData');
       return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
