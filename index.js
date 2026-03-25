@@ -557,7 +557,16 @@ app.get('/health', (_req, res) => {
   res.json({ status: 'ok', version: '3.0.0', timestamp: new Date().toISOString() });
 });
 app.get('/api/accounts', (_req, res) => { monarchQuery(GET_ACCOUNTS).then(d => res.json(d)).catch(e => res.status(500).json({error: String(e)})); });
-app.get('/api/transactions', (req, res) => { monarchQuery(GET_TRANSACTIONS, {filters: {startDate: req.query.startDate, endDate: req.query.endDate}}).then(d => res.json(d)).catch(e => res.status(500).json({error: String(e)})); });
+app.get('/api/transactions', (req, res) => {
+  const filters = {};
+  if (req.query.startDate) filters.startDate = req.query.startDate;
+  if (req.query.endDate) filters.endDate = req.query.endDate;
+  if (req.query.accountIds) filters.accounts = req.query.accountIds.split(',');
+  if (req.query.search) filters.search = req.query.search;
+  const limit = parseInt(req.query.limit) || 100;
+  const offset = parseInt(req.query.offset) || 0;
+  monarchQuery(GET_TRANSACTIONS, { filters, limit, offset }).then(d => res.json(d)).catch(e => res.status(500).json({ error: String(e) }));
+});
 app.get('/api/cashflow', (req, res) => { monarchQuery(GET_CASHFLOW_BY_CATEGORY, {filters: {startDate: req.query.startDate, endDate: req.query.endDate}}).then(d => res.json(d)).catch(e => res.status(500).json({error: e.message})); });
 
 app.post('/mcp', async (req, res) => {
