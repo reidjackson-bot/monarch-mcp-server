@@ -1,3 +1,5 @@
+// File: index.js
+
 import express from 'express';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
@@ -97,12 +99,19 @@ const GET_TRANSACTION_CATEGORIES = `
   }
 `;
 
+// FIX #5: The real Monarch field is `snapshotsByAccountType`, not `accountSnapshotsByType`.
+// It takes `startDate: Date!` and `timeframe: Timeframe!` (enum: YEAR | MONTH | QUARTER | WEEK).
+// There is no `endDate` and no `accountIds` argument at this level.
 const GET_ACCOUNT_SNAPSHOTS = `
-  query GetAccountSnapshots($startDate: String!, $endDate: String!, $accountIds: [UUID!]) {
-    accountSnapshotsByType(startDate: $startDate, endDate: $endDate, accountIds: $accountIds) {
+  query GetSnapshotsByAccountType($startDate: Date!, $timeframe: Timeframe!) {
+    snapshotsByAccountType(startDate: $startDate, timeframe: $timeframe) {
       accountType
       month
       balance
+    }
+    accountTypes {
+      name
+      group
     }
   }
 `;
@@ -330,10 +339,22 @@ const REFRESH_ACCOUNTS = `
   }
 `;
 
+// Helper: pick a sensible Monarch timeframe enum based on the requested range.
+// Monarch returns monthly snapshots back to `startDate` for YEAR, etc.
+function pickTimeframe(startDate, endDate) {
+  if (!startDate || !endDate) return 'YEAR';
+  const s = new Date(startDate);
+  const e = new Date(endDate);
+  const days = Math.max(0, (e - s) / 86400000);
+  if (days <= 31) return 'MONTH';
+  if (days <= 93) return 'QUARTER';
+  return 'YEAR';
+}
+
 function createServer() {
   const server = new McpServer({
     name: 'monarch-money-mcp',
-    version: '3.0.0',
+    version: '3.1.0',
   });
 
   // ─── Accounts ───
@@ -405,18 +426,38 @@ function createServer() {
   );
 
   // ─── Balances (historical snapshots) ───
+  // FIXED: Monarch's schema uses `snapshotsByAccountType(startDate, timeframe)`.
+  // We preserve the existing startDate/endDate/accountIds input shape for backward compat,
+  // but translate them: `startDate` is passed through, `endDate` is used to derive a
+  // `timeframe` enum, and `accountIds` is applied as a client-side filter on the result.
   server.tool(
     'monarch_get_balances',
     'Get historical balance snapshots by account type over a date range.',
     {
       startDate: z.string().describe('Start date (YYYY-MM-DD)'),
       endDate: z.string().describe('End date (YYYY-MM-DD)'),
-      accountIds: z.array(z.string()).optional().describe('Optional account IDs to filter'),
+      accountIds: z.array(z.string()).optional().describe('Optional account IDs to filter (client-side)'),
+      timeframe: z.enum(['MONTH', 'QUARTER', 'YEAR']).optional().describe('Optional override for Monarch timeframe enum'),
     },
-    async ({ startDate, endDate, accountIds }) => {
-      const variables = { startDate, endDate };
-      if (accountIds && accountIds.length > 0) variables.accountIds = accountIds;
-      const data = await monarchQuery(GET_ACCOUNT_SNAPSHOTS, variables);
+    async ({ startDate, endDate, accountIds, timeframe }) => {
+      const tf = timeframe || pickTimeframe(startDate, endDate);
+      const variables = { startDate, timeframe: tf };
+      const data = await monarchQuery(GET_ACCOUNT_SNAPSHOTS, variables, 'GetSnapshotsByAccountType');
+
+      // Also attach the requested endDate for downstream clients that expect it,
+      // and filter snapshot months to the requested window.
+      try {
+        const snaps = data?.data?.snapshotsByAccountType || [];
+        const filtered = snaps.filter((s) => {
+          if (!s.month) return true;
+          return s.month >= startDate && s.month <= endDate;
+        });
+        data.data.snapshotsByAccountType = filtered;
+        data.data._requestedRange = { startDate, endDate, timeframe: tf };
+      } catch (_e) {
+        // leave data untouched if shape is unexpected
+      }
+
       return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
     }
   );
@@ -554,7 +595,7 @@ const app = express();
 app.use(express.json());
 
 app.get('/health', (_req, res) => {
-  res.json({ status: 'ok', version: '3.0.0', timestamp: new Date().toISOString() });
+  res.json({ status: 'ok', version: '3.1.0', timestamp: new Date().toISOString() });
 });
 app.get('/api/accounts', (_req, res) => { monarchQuery(GET_ACCOUNTS).then(d => res.json(d)).catch(e => res.status(500).json({error: String(e)})); });
 app.get('/api/transactions', (req, res) => {
@@ -612,5 +653,5 @@ app.delete('/mcp', (_req, res) => {
 });
 
 app.listen(PORT, '0.0.0.0', () => {
-  console.log('[Monarch MCP] v3.0.0 on port ' + PORT);
+  console.log('[Monarch MCP] v3.1.0 on port ' + PORT);
 });
